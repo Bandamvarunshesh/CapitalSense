@@ -48,6 +48,7 @@ st.markdown(
           font-size: 1rem;
           margin-top: 0.4rem;
           color: #94A3B8;
+          line-height: 1.4;
       }
 
       /* Section Headers */
@@ -190,23 +191,27 @@ with left:
 # Results Panel
 # -------------------------------------------------
 with right:
+    st.markdown('<div class="cs-section">What It Does</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="cs-card">
+          CapitalSense models a startup’s financial future using transparent financial logic and Monte Carlo simulation.
+          It turns a small set of inputs (cash, revenue, costs, team size, growth, hiring) into runway and risk insights.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    st.markdown('<div class="cs-section">Platform Overview</div>', unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="cs-card">
-    <b>What It Does</b><br><br>
-    CapitalSense models startup financial performance using deterministic projections and Monte Carlo simulation.
-    It calculates runway duration, net burn, break-even probability, insolvency risk, safe hiring capacity,
-    and revenue sensitivity.
-
-    <br><br>
-    <b>Why It Is Used</b><br><br>
-    Founders and operators use CapitalSense to make disciplined decisions around hiring, burn control,
-    and fundraising timing. Instead of relying on single-point forecasts,
-    it quantifies uncertainty and measures downside risk.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="cs-section">Why It Is Used</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="cs-card">
+          Founders and operators use CapitalSense to make disciplined decisions around hiring, burn control,
+          and fundraising timing. Instead of relying on a single forecast, it quantifies uncertainty and downside risk.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     if not analyze:
         st.info("Adjust inputs and click Run Analysis.")
@@ -225,25 +230,44 @@ with right:
         "runs": runs
     }
 
-    result = run_analysis(payload)
+    with st.spinner("Running simulations..."):
+        result = run_analysis(payload)
 
     cm = result["current_metrics"]
     mc = result["monte_carlo"]
 
+    # -----------------------------
+    # Key Metrics
+    # -----------------------------
     st.markdown('<div class="cs-section">Key Metrics</div>', unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.markdown(f"<div class='metric-label'>Monthly Cost</div><div class='metric-value'>{fmt(cm['monthly_cost'])}</div>", unsafe_allow_html=True)
-    c2.markdown(f"<div class='metric-label'>Net Burn</div><div class='metric-value'>{fmt(cm['net_burn'])}</div>", unsafe_allow_html=True)
+    c1.markdown(
+        f"<div class='metric-label'>Monthly Cost</div><div class='metric-value'>{fmt(cm['monthly_cost'])}</div>",
+        unsafe_allow_html=True
+    )
+    c2.markdown(
+        f"<div class='metric-label'>Net Burn</div><div class='metric-value'>{fmt(cm['net_burn'])}</div>",
+        unsafe_allow_html=True
+    )
 
     runway = cm["runway_months"]
     runway_display = runway if isinstance(runway, str) else f"{runway:.1f}"
-    c3.markdown(f"<div class='metric-label'>Runway (months)</div><div class='metric-value'>{runway_display}</div>", unsafe_allow_html=True)
+    c3.markdown(
+        f"<div class='metric-label'>Runway (months)</div><div class='metric-value'>{runway_display}</div>",
+        unsafe_allow_html=True
+    )
 
     risk_label, risk_class = risk_text(mc["p_cash_negative_within_6_months"])
-    c4.markdown(f"<div class='metric-label'>Risk Level</div><div class='metric-value {risk_class}'>{risk_label}</div>", unsafe_allow_html=True)
+    c4.markdown(
+        f"<div class='metric-label'>Risk Level</div><div class='metric-value {risk_class}'>{risk_label}</div>",
+        unsafe_allow_html=True
+    )
 
+    # -----------------------------
+    # Scenario Projection Chart
+    # -----------------------------
     st.markdown('<div class="cs-section">Scenario Projection</div>', unsafe_allow_html=True)
 
     fig = plt.figure()
@@ -253,8 +277,54 @@ with right:
         ax.plot(sc["cash_curve"], label=sc["name"])
 
     ax.axhline(0)
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Cash")
     ax.legend()
-
     st.pyplot(fig, use_container_width=True)
+
+    # -----------------------------
+    # Conclusion Section (after chart)
+    # -----------------------------
+    st.markdown('<div class="cs-section">Conclusion</div>', unsafe_allow_html=True)
+
+    runway_val = cm["runway_months"]
+    risk_prob = float(mc["p_cash_negative_within_6_months"])
+
+    runway_numeric = None if isinstance(runway_val, str) else float(runway_val)
+
+    if runway_numeric is None:
+        runway_summary = "Runway could not be expressed numerically under current assumptions."
+    elif runway_numeric < 6:
+        runway_summary = (
+            "Runway is limited. Prioritize immediate burn reduction, revenue acceleration, "
+            "or fundraising preparation."
+        )
+    elif runway_numeric < 12:
+        runway_summary = (
+            "Runway is moderate. Hiring should be cautious and aligned with near-term revenue confidence."
+        )
+    else:
+        runway_summary = (
+            "Runway is healthy. You can pursue growth initiatives with measured confidence while monitoring burn."
+        )
+
+    if risk_prob > 0.40:
+        risk_summary = "Short-term insolvency risk is elevated under uncertainty. Mitigation actions are recommended."
+    elif risk_prob > 0.15:
+        risk_summary = "Short-term insolvency risk is moderate. Maintain a disciplined operating plan and monitor leading indicators."
+    else:
+        risk_summary = "Short-term insolvency risk appears controlled under current assumptions."
+
+    st.markdown(
+        f"""
+        <div class="cs-card">
+          <b>Executive Summary</b><br><br>
+          {runway_summary}<br><br>
+          <b>Risk assessment:</b> {risk_summary}<br><br>
+          Recommended next step: review costs, validate growth assumptions, and re-run the model monthly or after major hiring/funding decisions.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 st.markdown('<div class="footer">CapitalSense ©️ Financial Simulation Engine</div>', unsafe_allow_html=True)
