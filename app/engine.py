@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
-import numpy as np
+from typing import Any, Dict, List
+import math
+import random
 
 
 @dataclass
@@ -13,244 +14,252 @@ class Inputs:
     monthly_variable_costs: float
     team_size: int
     avg_fully_loaded_cost_per_employee: float
-    revenue_growth_rate_mom: float  # e.g., 0.08 for 8% MoM
-    planned_hires: int = 0          # hires immediately
+    revenue_growth_rate_mom: float  # e.g. 0.04 for 4% MoM
+    planned_hires: int = 0
 
 
-def monthly_total_cost(inp: Inputs) -> float:
-    payroll = (inp.team_size + inp.planned_hires) * inp.avg_fully_loaded_cost_per_employee
-    return float(inp.monthly_fixed_costs + inp.monthly_variable_costs + payroll)
+# -----------------------------
+# Core helper calculations
+# -----------------------------
+def _monthly_cost(inputs: Inputs) -> float:
+    payroll = float(inputs.team_size) * float(inputs.avg_fully_loaded_cost_per_employee)
+    return float(inputs.monthly_fixed_costs) + float(inputs.monthly_variable_costs) + payroll
 
 
-def burn_and_runway(inp: Inputs) -> Dict[str, float | str]:
-    cost = monthly_total_cost(inp)
-    net_burn = cost - inp.monthly_revenue  # + => burning
-    if net_burn <= 0:
-        runway = "infinite (profitable or break-even)"
-        runway_months_numeric = -1.0
-    else:
-        runway_months_numeric = float(inp.cash_on_hand / net_burn)
-        runway = float(runway_months_numeric)
+def _net_burn(inputs: Inputs) -> float:
+    # positive = burning cash, negative = generating cash
+    return _monthly_cost(inputs) - float(inputs.monthly_revenue)
 
+
+def _runway(inputs: Inputs) -> Dict[str, Any]:
+    burn = _net_burn(inputs)
+
+    if burn <= 0:
+        return {
+            "runway_months_numeric": float("inf"),
+            "runway_months_label": "Infinite (cash-flow positive)",
+        }
+
+    runway = float(inputs.cash_on_hand) / burn if burn > 0 else float("inf")
     return {
-        "monthly_cost": float(cost),
-        "net_burn": float(net_burn),
-        "runway_months": runway,
-        "runway_months_numeric": runway_months_numeric,
+        "runway_months_numeric": runway,
+        "runway_months_label": f"{runway:.1f} months",
     }
 
 
-def simulate_cash_curve(
-    cash0: float,
-    rev0: float,
-    cost0: float,
-    growth_mom: float,
-    cost_infl_mom: float,
-    months: int = 12
-) -> List[float]:
-    cash = float(cash0)
-    rev = float(rev0)
-    cost = float(cost0)
-    curve = [cash]
-
-    for _ in range(months):
-        cash = cash - (cost - rev)
-        curve.append(float(cash))
-        rev = rev * (1.0 + growth_mom)
-        cost = cost * (1.0 + cost_infl_mom)
-
-    return curve
+def _risk_label(p_cash_negative_within_6m: float) -> str:
+    if p_cash_negative_within_6m >= 0.60:
+        return "HIGH"
+    if p_cash_negative_within_6m >= 0.30:
+        return "MEDIUM"
+    return "LOW"
 
 
-def scenario_analysis(inp: Inputs, months: int = 12) -> List[Dict]:
-    base_cost = monthly_total_cost(inp)
-    g = inp.revenue_growth_rate_mom
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    # p in [0, 1]
+    if not sorted_vals:
+        return float("nan")
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+
+    idx = p * (len(sorted_vals) - 1)
+    lo = int(math.floor(idx))
+    hi = int(math.ceil(idx))
+    if lo == hi:
+        return float(sorted_vals[lo])
+    frac = idx - lo
+    return float(sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac)
+
+
+# -----------------------------
+# Scenario curves (for chart)
+# -----------------------------
+def _build_scenarios(inputs: Inputs, months: int) -> List[Dict[str, Any]]:
+    """
+    Builds 3 deterministic cash curves for charting:
+      - Base: uses given growth
+      - Optimistic: higher growth, slightly lower costs
+      - Conservative: lower growth, slightly higher costs
+    """
+    base_growth = float(inputs.revenue_growth_rate_mom)
 
     scenarios = [
-        ("optimistic", g * 1.25, 0.01),
-        ("base",       g,        0.02),
-        ("pessimistic", g * 0.60, 0.04),
+        {"name": "Conservative", "growth": max(-0.10, base_growth - 0.03), "cost_mult": 1.08},
+        {"name": "Base",         "growth": base_growth,                  "cost_mult": 1.00},
+        {"name": "Optimistic",   "growth": base_growth + 0.03,           "cost_mult": 0.95},
     ]
 
     out = []
-    for name, growth, infl in scenarios:
-        curve = simulate_cash_curve(
-            cash0=inp.cash_on_hand,
-            rev0=inp.monthly_revenue,
-            cost0=base_cost,
-            growth_mom=float(growth),
-            cost_infl_mom=float(infl),
-            months=months,
-        )
-        min_cash = float(min(curve))
-        out.append({
-            "name": name,
-            "growth_mom": float(growth),
-            "cost_inflation_mom": float(infl),
-            "cash_curve": curve,
-            "cash_end": float(curve[-1]),
-            "min_cash": min_cash,
-            "goes_negative": bool(min_cash < 0),
-        })
+    for sc in scenarios:
+        cash = float(inputs.cash_on_hand)
+        revenue = float(inputs.monthly_revenue)
+
+        curve = [cash]
+        for m in range(1, months + 1):
+            revenue *= (1.0 + sc["growth"])
+            cost = _monthly_cost(inputs) * float(sc["cost_mult"])
+            cash = cash + revenue - cost
+            curve.append(cash)
+
+        out.append({"name": sc["name"], "cash_by_month": curve})
     return out
 
 
-def monte_carlo_risk(inp: Inputs, months: int = 12, runs: int = 5000) -> Dict[str, float]:
-    base_cost = monthly_total_cost(inp)
-    base_growth = inp.revenue_growth_rate_mom
+# -----------------------------
+# Monte Carlo risk
+# -----------------------------
+def _monte_carlo_risk(inputs: Inputs, months: int, runs: int) -> Dict[str, Any]:
+    """
+    We simulate cash month-by-month with randomness in:
+      - revenue growth
+      - variable costs
+      - (optional) hire timing effect on payroll
 
-    growth_samples = np.random.uniform(base_growth * 0.6, base_growth * 1.4, size=runs)
-    infl_samples = np.random.uniform(0.00, 0.06, size=runs)
+    Returns:
+      - probability of going cash-negative within 6 months
+      - p10/p50/p90 runway (months until cash < 0)
+    """
+    base_growth = float(inputs.revenue_growth_rate_mom)
 
-    went_negative = 0
+    # Tunable uncertainty knobs (small but meaningful)
+    growth_sigma = 0.03  # +/- around growth
+    var_cost_sigma = 0.12  # variable costs fluctuate
+
+    # Spread planned hires over first 3 months (simple assumption)
+    hires_total = int(inputs.planned_hires or 0)
+    hire_schedule = [0] * months
+    if hires_total > 0:
+        spread_months = min(3, months)
+        per = hires_total // spread_months
+        rem = hires_total % spread_months
+        for i in range(spread_months):
+            hire_schedule[i] = per + (1 if i < rem else 0)
+
+    runway_samples = []
     neg_within_6 = 0
-    neg_within_3 = 0
-    break_even_within_horizon = 0
 
-    for i in range(runs):
-        cash = float(inp.cash_on_hand)
-        rev = float(inp.monthly_revenue)
-        cost = float(base_cost)
+    for _ in range(runs):
+        cash = float(inputs.cash_on_hand)
+        revenue = float(inputs.monthly_revenue)
 
-        g = float(growth_samples[i])
-        infl = float(infl_samples[i])
-
-        first_neg = None
-        hit_break_even = False
+        team = int(inputs.team_size)
+        went_negative_month = None
 
         for m in range(1, months + 1):
-            cash = cash - (cost - rev)
+            # random growth around base
+            g = random.gauss(base_growth, growth_sigma)
+            g = max(-0.30, min(g, 0.50))  # clamp extremes
+            revenue *= (1.0 + g)
 
-            if first_neg is None and cash < 0:
-                first_neg = m
+            # hires this month
+            if m - 1 < len(hire_schedule):
+                team += hire_schedule[m - 1]
 
-            if not hit_break_even and (rev - cost) >= 0:
-                hit_break_even = True
+            # costs this month
+            payroll = float(team) * float(inputs.avg_fully_loaded_cost_per_employee)
+            fixed = float(inputs.monthly_fixed_costs)
+            var = float(inputs.monthly_variable_costs) * max(0.0, random.gauss(1.0, var_cost_sigma))
+            cost = fixed + var + payroll
 
-            rev = rev * (1.0 + g)
-            cost = cost * (1.0 + infl)
+            cash = cash + revenue - cost
 
-        if first_neg is not None:
-            went_negative += 1
-            if first_neg <= 6:
-                neg_within_6 += 1
-            if first_neg <= 3:
-                neg_within_3 += 1
+            if cash < 0 and went_negative_month is None:
+                went_negative_month = m
+                break
 
-        if hit_break_even:
-            break_even_within_horizon += 1
+        # runway sample: if never negative, treat as months+1 (beyond horizon)
+        runway_m = float(went_negative_month if went_negative_month is not None else (months + 1))
+        runway_samples.append(runway_m)
+
+        if went_negative_month is not None and went_negative_month <= 6:
+            neg_within_6 += 1
+
+    runway_samples.sort()
+    p10 = _percentile(runway_samples, 0.10)
+    p50 = _percentile(runway_samples, 0.50)
+    p90 = _percentile(runway_samples, 0.90)
 
     return {
-        "runs": float(runs),
-        "p_cash_negative_within_horizon": float(went_negative / runs),
-        "p_cash_negative_within_6_months": float(neg_within_6 / runs),
-        "p_cash_negative_within_3_months": float(neg_within_3 / runs),
-        "p_break_even_within_horizon": float(break_even_within_horizon / runs),
+        "p_cash_negative_within_6_months": neg_within_6 / float(runs),
+        "runway_p10_months": p10,
+        "runway_p50_months": p50,
+        "runway_p90_months": p90,
     }
 
 
-def safe_hires_suggestion(inp: Inputs, min_runway_months: float = 9.0) -> Dict[str, float | str]:
-    best = 0
-    best_runway: float | str = "unknown"
+def _executive_summary(runway_months: float, p6: float, runway_p10: float) -> str:
+    if math.isinf(runway_months):
+        return "You are currently cash-flow positive. Focus on sustaining growth while keeping costs controlled."
 
-    for hires in range(0, 21):
-        test = Inputs(**{**inp.__dict__, "planned_hires": hires})
-        metrics = burn_and_runway(test)
-        runway_num = float(metrics["runway_months_numeric"])
+    if runway_months < 6 or p6 >= 0.60:
+        return (
+            "High risk: cash may run out soon. Consider immediate cost reduction, slowing hiring, "
+            "or accelerating revenue actions. Monitor weekly."
+        )
 
-        if runway_num < 0:
-            best = hires
-            best_runway = "infinite"
-            continue
+    if runway_months < 12 or p6 >= 0.30 or runway_p10 <= 8:
+        return (
+            "Moderate risk: runway is limited under downside scenarios. Tighten spending, prioritize revenue, "
+            "and track burn monthly."
+        )
 
-        if runway_num >= min_runway_months:
-            best = hires
-            best_runway = runway_num
-
-    return {
-        "min_required_runway_months": float(min_runway_months),
-        "safe_hires_now": float(best),
-        "resulting_runway_months": best_runway,
-    }
+    return "Lower risk: runway looks healthy. Keep monitoring burn and validate growth assumptions each month."
 
 
-def revenue_sensitivity(inp: Inputs, target_runway_months: float = 12.0) -> Dict[str, float | str]:
-    cost = monthly_total_cost(inp)
-    net_burn = cost - inp.monthly_revenue
+# -----------------------------
+# Public API: full_analysis()
+# -----------------------------
+def full_analysis(
+    inputs: Inputs,
+    projection_horizon_months: int = 18,
+    monte_carlo_runs: int = 5000
+) -> Dict[str, Any]:
 
-    if net_burn <= 0:
-        return {
-            "target_runway_months": float(target_runway_months),
-            "extra_monthly_revenue_needed_for_target_runway": 0.0,
-            "monthly_revenue_needed_for_break_even": float(cost),
-            "status": "Already break-even/profitable",
-        }
+    months = max(6, int(projection_horizon_months))
+    runs = max(300, int(monte_carlo_runs))
 
-    net_burn_target = inp.cash_on_hand / target_runway_months
-    extra_rev = max(0.0, net_burn - net_burn_target)
+    monthly_cost = _monthly_cost(inputs)
+    net_burn = _net_burn(inputs)
+    runway_info = _runway(inputs)
 
-    return {
-        "target_runway_months": float(target_runway_months),
-        "extra_monthly_revenue_needed_for_target_runway": float(extra_rev),
-        "monthly_revenue_needed_for_break_even": float(cost),
-        "status": "Burning cash",
-    }
+    # scenario curves for chart
+    scenarios = _build_scenarios(inputs, months)
 
+    # monte carlo
+    mc = _monte_carlo_risk(inputs, months, runs)
+    p6 = mc["p_cash_negative_within_6_months"]
+    risk_level = _risk_label(p6)
 
-def pivot_score(inp: Inputs, risk: Dict[str, float], metrics: Dict[str, float | str]) -> Dict:
-    p6 = float(risk["p_cash_negative_within_6_months"])
-    p12 = float(risk["p_cash_negative_within_horizon"])
-    pbe = float(risk["p_break_even_within_horizon"])
-
-    net_burn = float(metrics["net_burn"])
-    revenue = float(inp.monthly_revenue)
-    burn_ratio = 0.0 if revenue <= 0 else max(0.0, net_burn / revenue)
-
-    score = 0.0
-    reasons = []
-
-    score += 60.0 * p6
-    if p6 > 0.4:
-        reasons.append(f"High risk: probability of running out of cash within 6 months is {p6:.0%}.")
-
-    score += 25.0 * p12
-    if p12 > 0.5:
-        reasons.append(f"Longer-horizon risk: probability of cash going negative within 12 months is {p12:.0%}.")
-
-    score += min(25.0, 15.0 * burn_ratio)
-    if burn_ratio > 0.5:
-        reasons.append(f"Burn is high vs revenue: net burn is {burn_ratio:.2f}× monthly revenue.")
-
-    # If break-even probability is low, increase pivot pressure
-    if pbe < 0.25:
-        score += 10.0
-        reasons.append(f"Low break-even probability within horizon: {pbe:.0%}.")
-
-    if inp.revenue_growth_rate_mom < 0.03:
-        score += 8.0
-        reasons.append("Growth is low (<3% MoM), reaching break-even may require changes.")
-
-    score = float(min(100.0, score))
-
-    if not reasons:
-        reasons.append("Pivot pressure is moderate/low given current assumptions.")
-
-    return {"pivot_score": score, "reasons": reasons}
-
-
-def full_analysis(inp: Inputs, months: int = 12, runs: int = 5000) -> Dict:
-    metrics = burn_and_runway(inp)
-    scenarios = scenario_analysis(inp, months=months)
-    risk = monte_carlo_risk(inp, months=months, runs=runs)
-    hires = safe_hires_suggestion(inp, min_runway_months=9.0)
-    sensitivity = revenue_sensitivity(inp, target_runway_months=12.0)
-    pivot = pivot_score(inp, risk=risk, metrics=metrics)
+    summary = _executive_summary(runway_info["runway_months_numeric"], p6, mc["runway_p10_months"])
 
     return {
-        "current_metrics": metrics,
+        "inputs_echo": {
+            "cash_on_hand": float(inputs.cash_on_hand),
+            "monthly_revenue": float(inputs.monthly_revenue),
+            "monthly_fixed_costs": float(inputs.monthly_fixed_costs),
+            "monthly_variable_costs": float(inputs.monthly_variable_costs),
+            "team_size": int(inputs.team_size),
+            "avg_fully_loaded_cost_per_employee": float(inputs.avg_fully_loaded_cost_per_employee),
+            "revenue_growth_rate_mom": float(inputs.revenue_growth_rate_mom),
+            "planned_hires": int(inputs.planned_hires),
+        },
+        "metrics": {
+            "monthly_cost": float(monthly_cost),
+            "net_burn": float(net_burn),
+            "runway_months": (
+                None if math.isinf(runway_info["runway_months_numeric"]) else float(runway_info["runway_months_numeric"])
+            ),
+            "runway_label": runway_info["runway_months_label"],
+            "p_cash_negative_within_6_months": float(p6),
+            "risk_level": risk_level,
+            "runway_p10_months": float(mc["runway_p10_months"]),
+            "runway_p50_months": float(mc["runway_p50_months"]),
+            "runway_p90_months": float(mc["runway_p90_months"]),
+        },
         "scenarios": scenarios,
-        "monte_carlo": risk,
-        "hiring_suggestion": hires,
-        "revenue_sensitivity": sensitivity,
-        "pivot": pivot,
+        "executive_summary": summary,
+        "meta": {
+            "projection_horizon_months": months,
+            "monte_carlo_runs": runs,
+        },
     }
