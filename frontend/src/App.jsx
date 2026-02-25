@@ -481,9 +481,16 @@ export default function App() {
             </div>
 
             <div style={styles.actions}>
-              <button style={styles.buttonSecondary} onClick={checkBackend}>
-                Check Backend
+              <button 
+              type = "button"
+              style = {styles.button}
+              onclick = {checkBackend}
+              >
+                check backend
               </button>
+              <div style={{marginTop: 10, opacity:0.85}}>
+                Backend status:<b>{status}</b>
+              </div>
               <button
                 style={styles.buttonPrimary}
                 onClick={runAnalysis}
