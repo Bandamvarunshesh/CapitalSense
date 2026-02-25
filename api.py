@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from app.engine import Inputs, full_analysis
 
@@ -21,12 +21,12 @@ class InputsModel(BaseModel):
 
 app = FastAPI(title="CapitalSense API", version="1.0")
 
-# React dev server typically runs at http://localhost:5173
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
+        "https://capitalsense.pages.dev",  # Cloudflare Pages prod frontend
+        "http://localhost:5173",           # local dev
+        "http://127.0.0.1:5173",           # local dev
     ],
     allow_credentials=True,
     allow_methods=["*"],
