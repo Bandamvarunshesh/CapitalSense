@@ -1,124 +1,177 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Chart as ChartJS,
+  LineElement,
+  PointElement,
+  CategoryScale,
+  LinearScale,
+  Tooltip,
+  Legend,
+  Filler,
+} from "chart.js";
+import { Line } from "react-chartjs-2";
+
+ChartJS.register(
+  LineElement,
+  PointElement,
+  CategoryScale,
+  LinearScale,
+  Tooltip,
+  Legend,
+  Filler
+);
 
 export default function App() {
   const API_BASE = useMemo(() => {
     return (import.meta.env.VITE_API_BASE || "https://capitalsense.onrender.com").replace(/\/$/, "");
   }, []);
 
-  const FIELDS = useMemo(
-    () => [
-      { key: "cash_on_hand", label: "Cash On Hand", allowNegative: false },
-      { key: "monthly_revenue", label: "Monthly Revenue", allowNegative: false },
-      { key: "monthly_fixed_costs", label: "Monthly Fixed Costs", allowNegative: false },
-      { key: "monthly_variable_costs", label: "Monthly Variable Costs", allowNegative: false },
-      { key: "team_size", label: "Team Size", allowNegative: false, integerOnly: true },
-      { key: "avg_fully_loaded_cost_per_employee", label: "Avg Fully Loaded Cost / Employee", allowNegative: false },
-      { key: "revenue_growth_rate_mom", label: "Revenue Growth Rate (MoM)", allowNegative: true },
-      { key: "planned_hires", label: "Planned Hires", allowNegative: false, integerOnly: true },
-    ],
-    []
-  );
+  // --- Inputs stored as strings so user can backspace to empty without snapping to 0
+  const [inputs, setInputs] = useState({
+    cash_on_hand: "0",
+    monthly_revenue: "0",
+    monthly_fixed_costs: "0",
+    monthly_variable_costs: "0",
+    team_size: "0",
+    avg_fully_loaded_cost_per_employee: "0",
+    revenue_growth_rate_mom: "0",
+    planned_hires: "0",
+  });
 
-  const [inputs, setInputs] = useState(() => Object.fromEntries(FIELDS.map((f) => [f.key, "0"])));
   const [projectionMonths, setProjectionMonths] = useState("18");
   const [monteCarloRuns, setMonteCarloRuns] = useState("5000");
 
-  const [backendStatus, setBackendStatus] = useState("checking");
+  // Backend status: avoid showing "down" on first paint
+  const [backendStatus, setBackendStatus] = useState("checking"); // checking | ok | down
   const [loadingHealth, setLoadingHealth] = useState(false);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
 
-  useEffect(() => {
-    checkBackend(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [API_BASE]);
+  const resultsRef = useRef(null);
 
-  const sanitize = (raw, allowNegative, integerOnly) => {
-    let s = raw.replace(/[^\d.-]/g, "");
-    s = s.replace(/(?!^)-/g, "");
-    s = s.replace(/(\..*)\./g, "$1");
-    if (!allowNegative) s = s.replace(/-/g, "");
-    if (integerOnly) s = s.replace(/\./g, "");
-    return s;
-  };
-
-  const toNumber = (s) => {
-    if (s === "" || s === "-" || s === "." || s === "-.") return 0;
-    const n = Number(s);
+  // ---------- helpers ----------
+  const toNumber = (v) => {
+    // empty => 0 to keep backend stable
+    if (v === "" || v === "-" || v === "." || v === "-.") return 0;
+    const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   };
 
-  const onFocusSelectAll = (e) => requestAnimationFrame(() => e.target.select());
+  // allow only number typing; optionally allow negative for growth rate
+  const sanitizeNumber = (raw, { allowNegative = false } = {}) => {
+    let v = raw;
 
-  const onChangeField = (field) => (e) => {
-    const next = sanitize(e.target.value, field.allowNegative, field.integerOnly);
-    setInputs((prev) => ({ ...prev, [field.key]: next }));
-  };
+    // remove invalid chars
+    v = v.replace(/[^\d.\-]/g, "");
 
-  const normalizeOnBlur = (key) => (e) => {
-    const v = e.target.value;
-    if (v === "" || v === "-" || v === "." || v === "-.") {
-      setInputs((prev) => ({ ...prev, [key]: "0" }));
-      return;
+    // only one dot
+    const parts = v.split(".");
+    if (parts.length > 2) v = parts[0] + "." + parts.slice(1).join("");
+
+    // handle minus sign
+    if (!allowNegative) {
+      v = v.replace(/-/g, "");
+    } else {
+      // only one '-' and only at start
+      v = v.replace(/(?!^)-/g, "");
     }
-    if (v.endsWith(".")) setInputs((prev) => ({ ...prev, [key]: v.slice(0, -1) }));
+
+    return v;
   };
 
-  const normalizeMetaOnBlur = (setter) => (e) => {
-    const v = e.target.value;
-    if (v === "" || v === "-" || v === "." || v === "-.") {
-      setter("0");
-      return;
-    }
-    if (v.endsWith(".")) setter(v.slice(0, -1));
+  const setField = (key, { allowNegative = false } = {}) => (e) => {
+    const v = sanitizeNumber(e.target.value, { allowNegative });
+    setInputs((prev) => ({ ...prev, [key]: v }));
   };
 
-  async function checkBackend(silent = false) {
-    if (!silent) setLoadingHealth(true);
+  const setNumericState = (setter, { allowNegative = false } = {}) => (e) => {
+    const v = sanitizeNumber(e.target.value, { allowNegative });
+    setter(v);
+  };
+
+  const resetAll = () => {
+    setInputs({
+      cash_on_hand: "0",
+      monthly_revenue: "0",
+      monthly_fixed_costs: "0",
+      monthly_variable_costs: "0",
+      team_size: "0",
+      avg_fully_loaded_cost_per_employee: "0",
+      revenue_growth_rate_mom: "0",
+      planned_hires: "0",
+    });
+    setProjectionMonths("18");
+    setMonteCarloRuns("5000");
+    setResult(null);
+    setError("");
+  };
+
+  // ---------- backend ----------
+  const checkBackend = async () => {
+    setLoadingHealth(true);
     setError("");
     try {
       const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
       const data = await res.json();
-      setBackendStatus(data?.status === "ok" ? "ok" : "down");
+      if (res.ok && data?.status === "ok") {
+        setBackendStatus("ok");
+      } else {
+        setBackendStatus("down");
+      }
     } catch {
       setBackendStatus("down");
     } finally {
-      if (!silent) setLoadingHealth(false);
+      setLoadingHealth(false);
     }
-  }
-
-  const buildPayload = () => {
-    const payload = {};
-    for (const f of FIELDS) payload[f.key] = toNumber(inputs[f.key]);
-    payload.team_size = Math.max(0, Math.trunc(payload.team_size));
-    payload.planned_hires = Math.max(0, Math.trunc(payload.planned_hires));
-    return payload;
   };
 
+  // auto-check on load (prevents "down" flash)
+  useEffect(() => {
+    checkBackend();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [API_BASE]);
+
+  // ---------- run analysis ----------
   const runAnalysis = async () => {
     setLoadingAnalysis(true);
     setError("");
     setResult(null);
 
     try {
-      const pm = Math.max(1, Math.trunc(toNumber(projectionMonths)));
-      const mcr = Math.max(100, Math.trunc(toNumber(monteCarloRuns)));
+      const payload = {
+        cash_on_hand: toNumber(inputs.cash_on_hand),
+        monthly_revenue: toNumber(inputs.monthly_revenue),
+        monthly_fixed_costs: toNumber(inputs.monthly_fixed_costs),
+        monthly_variable_costs: toNumber(inputs.monthly_variable_costs),
+        team_size: Math.max(0, Math.floor(toNumber(inputs.team_size))),
+        avg_fully_loaded_cost_per_employee: toNumber(inputs.avg_fully_loaded_cost_per_employee),
+        revenue_growth_rate_mom: toNumber(inputs.revenue_growth_rate_mom),
+        planned_hires: Math.max(0, Math.floor(toNumber(inputs.planned_hires))),
+      };
 
       const res = await fetch(
-        `${API_BASE}/analyze?projection_horizon_months=${pm}&monte_carlo_runs=${mcr}`,
+        `${API_BASE}/analyze?projection_horizon_months=${toNumber(projectionMonths)}&monte_carlo_runs=${toNumber(monteCarloRuns)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildPayload()),
+          body: JSON.stringify(payload),
         }
       );
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail ? JSON.stringify(data.detail) : JSON.stringify(data));
+
+      if (!res.ok) {
+        throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+      }
 
       setResult(data);
-      setBackendStatus("ok");
+
+      // smooth scroll to results
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 80);
     } catch (err) {
       setError(err?.message || "Something went wrong");
     } finally {
@@ -126,492 +179,582 @@ export default function App() {
     }
   };
 
-  const resetAll = () => {
-    setInputs(Object.fromEntries(FIELDS.map((f) => [f.key, "0"])));
-    setProjectionMonths("18");
-    setMonteCarloRuns("5000");
-    setResult(null);
-    setError("");
-  };
-
-  // ----------- Chart (canvas) -----------
-  const canvasRef = useRef(null);
-
-  const cashSeries = useMemo(() => {
-    if (!result?.scenarios?.length) return null;
-
-    const scenarios = result.scenarios
-      .filter((s) => s && typeof s === "object")
-      .slice(0, 3)
-      .map((s, idx) => ({
-        name: s.name || ["Conservative", "Base", "Optimistic"][idx] || `Scenario ${idx + 1}`,
-        values: Array.isArray(s.cash_by_month) ? s.cash_by_month.map((x) => Number(x)) : [],
-      }));
-
-    const maxLen = Math.max(...scenarios.map((s) => s.values.length), 0);
-    if (!maxLen) return null;
-
-    const months = Array.from({ length: maxLen }, (_, i) => i);
-    return { months, scenarios };
+  // ---------- build chart data ----------
+  const scenarios = useMemo(() => {
+    const list = result?.scenarios || [];
+    // Expect backend returns scenarios like:
+    // [{ name: "Conservative", cash_by_month: [...] }, ...]
+    return Array.isArray(list) ? list : [];
   }, [result]);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !cashSeries) return;
+  const chartData = useMemo(() => {
+    if (!scenarios.length) return null;
 
-    const parent = canvas.parentElement;
-    const width = Math.max(520, parent?.clientWidth || 900);
-    const height = 320;
+    // Create x labels: 0..N-1 (months)
+    const maxLen = Math.max(...scenarios.map((s) => (s?.cash_by_month?.length || 0)));
+    const labels = Array.from({ length: maxLen }, (_, i) => `M${i}`);
 
-    canvas.width = Math.floor(width * devicePixelRatio);
-    canvas.height = Math.floor(height * devicePixelRatio);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+    // Use safe fallback
+    const safeArr = (a) => (Array.isArray(a) ? a : []);
 
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    const datasets = scenarios.map((s) => {
+      const name = s?.name || "Scenario";
+      const cash = safeArr(s?.cash_by_month);
 
-    ctx.clearRect(0, 0, width, height);
-
-    const P = { l: 56, r: 18, t: 18, b: 38 };
-    const x0 = P.l;
-    const x1 = width - P.r;
-    const y0 = height - P.b;
-    const y1 = P.t;
-
-    const all = cashSeries.scenarios.flatMap((s) => s.values);
-    const minY = Math.min(...all, 0);
-    const maxY = Math.max(...all, 0);
-    const range = maxY - minY || 1;
-
-    const xFor = (i) => x0 + (i * (x1 - x0)) / Math.max(1, cashSeries.months.length - 1);
-    const yFor = (v) => y0 - ((v - minY) * (y0 - y1)) / range;
-
-    // grid
-    ctx.globalAlpha = 0.25;
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i++) {
-      const y = y1 + (i * (y0 - y1)) / 4;
-      ctx.beginPath();
-      ctx.moveTo(x0, y);
-      ctx.lineTo(x1, y);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    // axes
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y0);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x0, y1);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    // 0 line
-    if (minY < 0 && maxY > 0) {
-      ctx.globalAlpha = 0.7;
-      ctx.setLineDash([6, 6]);
-      ctx.beginPath();
-      ctx.moveTo(x0, yFor(0));
-      ctx.lineTo(x1, yFor(0));
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
-    }
-
-    const colors = ["#A855F7", "#22C55E", "#60A5FA"];
-
-    cashSeries.scenarios.forEach((s, idx) => {
-      ctx.strokeStyle = colors[idx % colors.length];
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      s.values.forEach((v, i) => {
-        const x = xFor(i);
-        const y = yFor(v);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
+      // Gradient fill handled by scriptable backgroundColor
+      return {
+        label: name,
+        data: cash,
+        borderWidth: 3,
+        tension: 0.32,
+        pointRadius: 0,
+        fill: true,
+        backgroundColor: (ctx) => {
+          const { chart } = ctx;
+          const { ctx: c, chartArea } = chart;
+          if (!chartArea) return "rgba(255,255,255,0.06)";
+          const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          g.addColorStop(0, "rgba(255,255,255,0.22)");
+          g.addColorStop(1, "rgba(255,255,255,0.02)");
+          return g;
+        },
+      };
     });
 
-    // legend
-    ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
-    cashSeries.scenarios.forEach((s, idx) => {
-      ctx.fillStyle = colors[idx % colors.length];
-      ctx.fillRect(x0 + idx * 150, 8, 12, 12);
-      ctx.fillStyle = "rgba(255,255,255,0.92)";
-      ctx.fillText(s.name, x0 + idx * 150 + 18, 19);
-    });
-  }, [cashSeries]);
+    return { labels, datasets };
+  }, [scenarios]);
 
-  // ----------- Conclusion (more detailed) -----------
-  const conclusion = useMemo(() => {
-    if (!result?.metrics) return null;
+  const chartOptions = useMemo(() => {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          labels: { color: "rgba(255,255,255,0.85)", font: { size: 12, weight: "600" } },
+        },
+        tooltip: {
+          enabled: true,
+          backgroundColor: "rgba(20, 22, 30, 0.92)",
+          borderColor: "rgba(255,255,255,0.12)",
+          borderWidth: 1,
+          titleColor: "#fff",
+          bodyColor: "rgba(255,255,255,0.9)",
+          padding: 10,
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              const formatted = Number.isFinite(v) ? v.toLocaleString() : v;
+              return `${ctx.dataset.label}: ${formatted}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "rgba(255,255,255,0.08)" },
+          ticks: { color: "rgba(255,255,255,0.7)" },
+          title: {
+            display: true,
+            text: "Months",
+            color: "rgba(255,255,255,0.85)",
+            font: { weight: "700" },
+          },
+        },
+        y: {
+          grid: { color: "rgba(255,255,255,0.08)" },
+          ticks: { color: "rgba(255,255,255,0.7)" },
+          title: {
+            display: true,
+            text: "Cash Balance",
+            color: "rgba(255,255,255,0.85)",
+            font: { weight: "700" },
+          },
+        },
+      },
+    };
+  }, []);
 
-    const risk = result.metrics?.risk_level ?? "UNKNOWN";
-    const runwayLabel = result.metrics?.runway_label ?? "—";
-    const p6 = result.metrics?.p_cash_negative_within_6_months;
-    const p10 = result.metrics?.runway_p10_months;
-    const p50 = result.metrics?.runway_p50_months;
-    const p90 = result.metrics?.runway_p90_months;
+  // ---------- conclusion builder ----------
+  const metrics = result?.metrics || {};
+  const riskLevel = (metrics?.risk_level || "—").toString().toUpperCase();
+  const pNegative6 = metrics?.p_cash_negative_within_6_months;
+  const runwayLabel = metrics?.runway_label ?? "—";
+  const runwayP10 = metrics?.runway_p10_months;
+  const runwayP50 = metrics?.runway_p50_months;
+  const runwayP90 = metrics?.runway_p90_months;
 
-    let interpretation = "";
-    let recommendations = [];
-
-    if (risk === "HIGH") {
-      interpretation =
-        "The conservative or base scenario trends suggest cash can turn negative quickly. This indicates burn is too high relative to revenue, and small misses in growth can materially reduce runway.";
-      recommendations = [
-        "Freeze non-essential hiring and reduce discretionary spend immediately.",
-        "Negotiate fixed costs (vendors, cloud spend, offices) to lower burn.",
-        "Prioritize short-cycle revenue: collections, renewals, pricing, and upsell.",
-        "Raise capital or secure a credit line early (before runway becomes critical).",
-      ];
-    } else if (risk === "MEDIUM") {
-      interpretation =
-        "Runway is workable, but downside scenarios still show meaningful risk. The business should stay disciplined because small cost increases or slower growth can push runway down fast.";
-      recommendations = [
-        "Keep hiring controlled and tie headcount to revenue milestones.",
-        "Reduce burn 10–20% by optimizing variable costs and low-ROI spend.",
-        "Track runway weekly and rerun scenarios monthly as inputs change.",
-        "Improve revenue predictability (pipeline hygiene, retention, collections).",
-      ];
-    } else {
-      interpretation =
-        "Your scenarios indicate healthier runway. Even conservative outcomes keep cash relatively stable. This supports planned growth, but you should still monitor burn to avoid sudden runway compression.";
-      recommendations = [
-        "Scale gradually: hire in stages and measure ROI per hire.",
-        "Maintain a cash buffer and set a minimum runway policy (e.g., 9–12 months).",
-        "Stress-test scenarios monthly (growth slowdown, cost spikes) to stay prepared.",
-        "Keep cost structure flexible to adapt quickly if revenue changes.",
-      ];
-    }
-
-    const p6Text = typeof p6 === "number" ? `${(p6 * 100).toFixed(1)}%` : "—";
-    const runwayText = `Runway label: ${runwayLabel}. Runway distribution (months): P10=${p10 ?? "—"}, P50=${p50 ?? "—"}, P90=${p90 ?? "—"}.`;
-
-    return { risk, interpretation, p6Text, runwayText, recommendations };
-  }, [result]);
-
-  // ----------- Styles -----------
-  const styles = {
-    page: {
-      minHeight: "100vh",
-      width: "100vw",
-      margin: 0,
-      padding: "28px 22px",
-      boxSizing: "border-box",
-      color: "#fff",
-      background:
-        "radial-gradient(1200px 800px at 10% 10%, rgba(168,85,247,0.26), transparent 60%)," +
-        "radial-gradient(1200px 800px at 90% 30%, rgba(34,197,94,0.20), transparent 55%)," +
-        "linear-gradient(180deg, #070A12 0%, #0B1020 55%, #070A12 100%)",
-      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
-    },
-    headerRow: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 14,
-      justifyContent: "space-between",
-      alignItems: "flex-start",
-      marginBottom: 18,
-    },
-    titleBlock: { maxWidth: 980 },
-    brandPill: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 8,
+  const riskBadge = useMemo(() => {
+    const level = riskLevel;
+    const base = {
       padding: "6px 12px",
       borderRadius: 999,
-      background: "rgba(255,255,255,0.08)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      backdropFilter: "blur(10px)",
-      marginBottom: 10,
       fontWeight: 800,
-      letterSpacing: 0.8,
-    },
-    h1: {
-      margin: 0,
-      fontSize: 52,
-      lineHeight: 1.03,
-      fontWeight: 950,
-      letterSpacing: 1.6,
-      textTransform: "uppercase",
-      background: "linear-gradient(90deg, #A855F7, #60A5FA, #22C55E)",
-      WebkitBackgroundClip: "text",
-      WebkitTextFillColor: "transparent",
-    },
-    subtitle: {
-      marginTop: 10,
-      marginBottom: 0,
-      color: "rgba(255,255,255,0.82)",
-      fontSize: 15,
-      lineHeight: 1.45,
-      maxWidth: 980,
-    },
-    rightControls: { display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" },
-    statusPill: (ok) => ({
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "8px 12px",
-      borderRadius: 999,
-      fontWeight: 800,
-      fontSize: 13,
-      background: ok ? "rgba(34,197,94,0.18)" : "rgba(239,68,68,0.18)",
-      border: ok ? "1px solid rgba(34,197,94,0.35)" : "1px solid rgba(239,68,68,0.35)",
-      color: ok ? "#BBF7D0" : "#FECACA",
-    }),
-    button: (variant) => ({
-      cursor: "pointer",
-      border: "1px solid rgba(255,255,255,0.14)",
-      borderRadius: 12,
-      padding: "12px 14px",
-      fontWeight: 900,
-      color: "#fff",
-      background:
-        variant === "primary"
-          ? "linear-gradient(90deg, rgba(168,85,247,0.95), rgba(34,197,94,0.95))"
-          : "rgba(255,255,255,0.08)",
-      boxShadow: "0 10px 24px rgba(0,0,0,0.35)",
-      minWidth: 180,
-      textAlign: "center",
-    }),
-    smallText: { fontSize: 12, color: "rgba(255,255,255,0.65)" },
+      fontSize: 12,
+      letterSpacing: "0.08em",
+      display: "inline-block",
+    };
+    if (level === "HIGH") return { ...base, background: "rgba(255,77,79,0.18)", color: "#ffb3b3", border: "1px solid rgba(255,77,79,0.35)" };
+    if (level === "MEDIUM") return { ...base, background: "rgba(250,173,20,0.16)", color: "#ffe0a3", border: "1px solid rgba(250,173,20,0.35)" };
+    if (level === "LOW") return { ...base, background: "rgba(82,196,26,0.14)", color: "#c8ffb6", border: "1px solid rgba(82,196,26,0.35)" };
+    return { ...base, background: "rgba(255,255,255,0.10)", color: "rgba(255,255,255,0.85)", border: "1px solid rgba(255,255,255,0.18)" };
+  }, [riskLevel]);
 
-    main: {
-      display: "grid",
-      gridTemplateColumns: "minmax(340px, 460px) 1fr",
-      gap: 18,
-      alignItems: "start",
-      width: "100%",
-    },
+  const conclusionText = useMemo(() => {
+    if (!result) return null;
 
-    card: {
-      borderRadius: 18,
-      padding: 16,
-      background: "rgba(255,255,255,0.06)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      boxShadow: "0 18px 40px rgba(0,0,0,0.35)",
-      backdropFilter: "blur(10px)",
-      overflow: "hidden",
-    },
-    cardTitleRow: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 10,
-      marginBottom: 10,
-    },
-    cardTitle: { margin: 0, fontSize: 16, fontWeight: 950, letterSpacing: 0.4 },
+    const p = Number.isFinite(pNegative6) ? (pNegative6 * 100).toFixed(1) : null;
 
-    // ✅ OVERLAP FIX: auto-fit with min width + gap
-    inputsGrid: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-      gap: 12,
-    },
-    field: { display: "flex", flexDirection: "column", gap: 6, minWidth: 0 },
-    label: { fontSize: 12, fontWeight: 900, color: "rgba(255,255,255,0.88)" },
-    input: {
-      width: "100%",
-      boxSizing: "border-box",
-      height: 46,
-      padding: "10px 12px",
-      borderRadius: 12,
-      border: "1px solid rgba(255,255,255,0.16)",
-      background: "rgba(10,14,24,0.65)",
-      color: "#fff",
-      outline: "none",
-      fontWeight: 800,
-    },
+    const runwayLine =
+      `Runway label: ${runwayLabel}. ` +
+      `Runway distribution (months): P10=${runwayP10 ?? "—"}, P50=${runwayP50 ?? "—"}, P90=${runwayP90 ?? "—"}.`;
 
-    resultsHeader: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 },
-    statBox: {
-      padding: 12,
-      borderRadius: 14,
-      background: "rgba(0,0,0,0.25)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      minHeight: 64,
-    },
-    statLabel: { fontSize: 12, color: "rgba(255,255,255,0.7)", fontWeight: 900 },
-    statValue: { marginTop: 6, fontSize: 18, fontWeight: 950 },
+    let narrative = "";
+    if (riskLevel === "HIGH") {
+      narrative =
+        "Your current burn and/or cost structure is putting cash at risk very quickly. Even small misses in revenue growth or unexpected expenses can push cash negative sooner than expected. The priority is to immediately extend runway and reduce uncertainty.";
+    } else if (riskLevel === "MEDIUM") {
+      narrative =
+        "Your runway looks manageable, but the downside scenarios still matter. You should reduce avoidable burn, improve predictability in revenue collection, and keep contingency plans ready if growth slows.";
+    } else if (riskLevel === "LOW") {
+      narrative =
+        "Your cash position appears resilient across scenarios. The main focus is to sustain growth efficiently—avoid unnecessary fixed-cost expansion and keep monitoring leading indicators (collections, churn, CAC).";
+    } else {
+      narrative =
+        "Review the scenario lines and the runway distribution to understand how sensitive your cash is to growth and costs. Focus on steps that increase runway and reduce downside risk.";
+    }
 
-    chartWrap: {
-      marginTop: 12,
-      padding: 12,
-      borderRadius: 16,
-      background: "rgba(0,0,0,0.25)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      overflowX: "auto",
-    },
+    const actions =
+      riskLevel === "HIGH"
+        ? [
+            "Freeze non-essential hiring and pause discretionary spend for the next 30–60 days.",
+            "Negotiate fixed costs (vendors/cloud/office) and cut recurring commitments that don’t drive near-term revenue.",
+            "Prioritize short-cycle revenue: collections, renewals, pricing updates, and upsells.",
+            "Create a 13-week cash plan and review it weekly (cash-in vs cash-out).",
+            "If needed, start fundraising or secure a credit line early (before runway becomes critical).",
+          ]
+        : riskLevel === "MEDIUM"
+        ? [
+            "Reduce burn by targeting the biggest recurring cost drivers first.",
+            "Tighten forecasting: track pipeline conversion, collections timing, and churn weekly.",
+            "Delay irreversible fixed-cost commitments until you see stable growth.",
+            "Maintain a contingency plan: ‘what we cut first’ if growth slows.",
+          ]
+        : [
+            "Invest in growth areas with clear ROI, but avoid locking in too much fixed cost too quickly.",
+            "Keep monitoring: revenue growth, gross margin, and variable costs as volume scales.",
+            "Stress test monthly: ‘What if growth is 50% lower for 2 months?’",
+          ];
 
-    conclusion: {
-      marginTop: 12,
-      padding: 14,
-      borderRadius: 16,
-      background: "rgba(0,0,0,0.25)",
-      border: "1px solid rgba(255,255,255,0.12)",
-    },
-    conclusionTitle: { margin: 0, fontSize: 14, fontWeight: 950, marginBottom: 8 },
-    ul: { margin: "10px 0 0 18px", color: "rgba(255,255,255,0.82)", lineHeight: 1.55, fontSize: 13 },
-  };
+    const probabilityLine = p !== null ? `Probability of cash going negative within 6 months: ${p}%.` : "";
 
-  const ok = backendStatus === "ok";
+    return { runwayLine, narrative, probabilityLine, actions };
+  }, [
+    result,
+    pNegative6,
+    runwayLabel,
+    runwayP10,
+    runwayP50,
+    runwayP90,
+    riskLevel,
+  ]);
+
+  // ---------- UI ----------
+  const statusPill = useMemo(() => {
+    const common = { padding: "8px 12px", borderRadius: 999, fontWeight: 700, fontSize: 12, display: "inline-flex", gap: 8, alignItems: "center" };
+    if (backendStatus === "ok") return { ...common, background: "rgba(82,196,26,0.16)", border: "1px solid rgba(82,196,26,0.35)", color: "#d6ffcc" };
+    if (backendStatus === "down") return { ...common, background: "rgba(255,77,79,0.14)", border: "1px solid rgba(255,77,79,0.30)", color: "#ffcccc" };
+    return { ...common, background: "rgba(255,255,255,0.10)", border: "1px solid rgba(255,255,255,0.18)", color: "rgba(255,255,255,0.86)" };
+  }, [backendStatus]);
+
+  const statusText =
+    backendStatus === "ok" ? "Backend: OK" : backendStatus === "down" ? "Backend: Unreachable" : "Backend: Checking…";
 
   return (
-    <div style={styles.page}>
-      <div style={styles.headerRow}>
-        <div style={styles.titleBlock}>
-          <div style={styles.brandPill}>CAPITALSENSE</div>
-          <h1 style={styles.h1}>CAPITALSENSE</h1>
-          <p style={styles.subtitle}>
-            Enter your business inputs, run a 3-scenario simulation, and get a clear runway + risk conclusion with practical next steps.
-          </p>
-        </div>
+    <>
+      <style>{`
+        :root {
+          --bg1: #0b1020;
+          --bg2: #141a35;
+          --card: rgba(255,255,255,0.08);
+          --card2: rgba(255,255,255,0.06);
+          --border: rgba(255,255,255,0.14);
+          --text: rgba(255,255,255,0.92);
+          --muted: rgba(255,255,255,0.68);
+        }
+        * { box-sizing: border-box; }
+        html, body, #root { height: 100%; margin: 0; }
+        body {
+          background: radial-gradient(1200px 800px at 20% 10%, rgba(138, 94, 255, 0.28), transparent 55%),
+                      radial-gradient(1000px 700px at 80% 20%, rgba(0, 212, 255, 0.18), transparent 55%),
+                      linear-gradient(180deg, var(--bg1), var(--bg2));
+          color: var(--text);
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        }
+        .page {
+          min-height: 100%;
+          padding: 22px 22px 28px;
+        }
+        .topbar {
+          display: flex;
+          gap: 16px;
+          align-items: flex-start;
+          justify-content: space-between;
+          margin-bottom: 18px;
+        }
+        .brand {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          max-width: 840px;
+        }
+        .logo {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .dot {
+          width: 10px; height: 10px; border-radius: 999px;
+          background: linear-gradient(135deg, rgba(140, 80, 255, 1), rgba(0, 212, 255, 1));
+          box-shadow: 0 0 18px rgba(140, 80, 255, 0.6);
+        }
+        .title {
+          margin: 0;
+          font-size: clamp(28px, 3.2vw, 42px);
+          font-weight: 900;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          line-height: 1.1;
+        }
+        .subtitle {
+          margin: 0;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.4;
+        }
+        .actions {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          align-items: flex-end;
+          min-width: 280px;
+        }
+        .btn {
+          border: 1px solid rgba(255,255,255,0.16);
+          background: rgba(255,255,255,0.10);
+          color: var(--text);
+          padding: 10px 14px;
+          border-radius: 12px;
+          font-weight: 800;
+          cursor: pointer;
+          transition: transform 120ms ease, background 120ms ease;
+          width: 100%;
+        }
+        .btn:hover { transform: translateY(-1px); background: rgba(255,255,255,0.14); }
+        .btnPrimary {
+          background: linear-gradient(135deg, rgba(140, 80, 255, 0.95), rgba(0, 212, 255, 0.75));
+          border: 1px solid rgba(255,255,255,0.18);
+        }
+        .btnPrimary:hover { background: linear-gradient(135deg, rgba(140, 80, 255, 1), rgba(0, 212, 255, 0.85)); }
+        .hint {
+          color: rgba(255,255,255,0.72);
+          font-size: 12px;
+          text-align: right;
+          word-break: break-all;
+        }
+        .grid {
+          display: grid;
+          grid-template-columns: 420px 1fr;
+          gap: 18px;
+        }
+        @media (max-width: 980px) {
+          .grid { grid-template-columns: 1fr; }
+          .actions { align-items: stretch; min-width: unset; }
+        }
+        .card {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 18px;
+          padding: 16px;
+          box-shadow: 0 10px 32px rgba(0,0,0,0.25);
+          backdrop-filter: blur(10px);
+        }
+        .cardTitle {
+          margin: 0 0 10px;
+          font-size: 14px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: rgba(255,255,255,0.9);
+        }
+        .inputsGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+        }
+        @media (max-width: 520px) {
+          .inputsGrid { grid-template-columns: 1fr; }
+        }
+        .field label {
+          display: block;
+          font-size: 12px;
+          color: rgba(255,255,255,0.72);
+          margin-bottom: 6px;
+          font-weight: 700;
+        }
+        .field input {
+          width: 100%;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.16);
+          background: rgba(10, 12, 20, 0.55);
+          color: rgba(255,255,255,0.92);
+          outline: none;
+        }
+        .field input:focus {
+          border-color: rgba(0, 212, 255, 0.55);
+          box-shadow: 0 0 0 4px rgba(0, 212, 255, 0.12);
+        }
+        .rowActions {
+          display: flex;
+          gap: 10px;
+          margin-top: 12px;
+        }
+        .rowActions .btn { width: auto; flex: 1; }
+        .chartWrap {
+          height: 340px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 16px;
+          padding: 10px;
+        }
+        .kpis {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 12px;
+          margin: 12px 0 14px;
+        }
+        @media (max-width: 920px) {
+          .kpis { grid-template-columns: 1fr; }
+        }
+        .kpi {
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 16px;
+          padding: 12px 14px;
+        }
+        .kpi .k {
+          color: rgba(255,255,255,0.68);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+        .kpi .v {
+          margin-top: 6px;
+          font-size: 18px;
+          font-weight: 900;
+        }
+        .fadeIn {
+          animation: fadeUp 260ms ease both;
+        }
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .footerNote {
+          margin-top: 12px;
+          color: rgba(255,255,255,0.55);
+          font-size: 12px;
+          text-align: center;
+        }
+        .error {
+          margin-top: 10px;
+          padding: 10px 12px;
+          background: rgba(255,77,79,0.12);
+          border: 1px solid rgba(255,77,79,0.25);
+          border-radius: 12px;
+          color: rgba(255,220,220,0.95);
+          font-weight: 700;
+          white-space: pre-wrap;
+        }
+        ul { margin: 8px 0 0 18px; color: rgba(255,255,255,0.86); }
+        li { margin: 6px 0; }
+      `}</style>
 
-        <div style={styles.rightControls}>
-          <div style={styles.statusPill(ok)}>
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: 99,
-                background: ok ? "#22C55E" : backendStatus === "checking" ? "#60A5FA" : "#EF4444",
-                display: "inline-block",
-              }}
-            />
-            {backendStatus === "checking" ? "Backend: Checking…" : ok ? "Backend: OK" : "Backend: Down"}
-          </div>
-
-          <button style={styles.button("secondary")} onClick={() => checkBackend(false)} disabled={loadingHealth}>
-            {loadingHealth ? "Checking…" : "Check Backend"}
-          </button>
-
-          <div style={styles.smallText}>API: {API_BASE}</div>
-        </div>
-      </div>
-
-      <div style={styles.main}>
-        {/* Inputs */}
-        <div style={styles.card}>
-          <div style={styles.cardTitleRow}>
-            <h3 style={styles.cardTitle}>Inputs</h3>
-            <button style={styles.button("secondary")} onClick={resetAll}>
-              Reset
-            </button>
-          </div>
-
-          <div style={styles.inputsGrid}>
-            {FIELDS.map((f) => (
-              <div key={f.key} style={styles.field}>
-                <label style={styles.label}>{f.label}</label>
-                <input
-                  style={styles.input}
-                  type="text"
-                  inputMode={f.integerOnly ? "numeric" : "decimal"}
-                  value={inputs[f.key]}
-                  placeholder="0"
-                  onFocus={onFocusSelectAll}
-                  onChange={onChangeField(f)}
-                  onBlur={normalizeOnBlur(f.key)}
-                />
+      <div className="page">
+        <div className="topbar">
+          <div className="brand">
+            <div className="logo">
+              <span className="dot" />
+              <div>
+                <h1 className="title">CAPITALSENSE</h1>
+                <p className="subtitle">
+                  Run cash runway & risk simulation. Enter inputs, verify backend health, then run analysis to generate scenario results and recommendations.
+                </p>
               </div>
-            ))}
-
-            <div style={styles.field}>
-              <label style={styles.label}>Projection Months</label>
-              <input
-                style={styles.input}
-                type="text"
-                inputMode="numeric"
-                value={projectionMonths}
-                placeholder="18"
-                onFocus={onFocusSelectAll}
-                onChange={(e) => setProjectionMonths(sanitize(e.target.value, false, true))}
-                onBlur={normalizeMetaOnBlur(setProjectionMonths)}
-              />
-            </div>
-
-            <div style={styles.field}>
-              <label style={styles.label}>Monte Carlo Runs</label>
-              <input
-                style={styles.input}
-                type="text"
-                inputMode="numeric"
-                value={monteCarloRuns}
-                placeholder="5000"
-                onFocus={onFocusSelectAll}
-                onChange={(e) => setMonteCarloRuns(sanitize(e.target.value, false, true))}
-                onBlur={normalizeMetaOnBlur(setMonteCarloRuns)}
-              />
             </div>
           </div>
 
-          <button style={styles.button("primary")} onClick={runAnalysis} disabled={loadingAnalysis}>
-            {loadingAnalysis ? "Running…" : "Run Analysis"}
-          </button>
+          <div className="actions">
+            <div style={statusPill}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: backendStatus === "ok" ? "#52c41a" : backendStatus === "down" ? "#ff4d4f" : "rgba(255,255,255,0.55)" }} />
+              <span>{statusText}</span>
+            </div>
 
-          {error ? (
-            <div style={{ marginTop: 12, color: "#FECACA", fontWeight: 800, whiteSpace: "pre-wrap" }}>{error}</div>
-          ) : null}
+            <button className="btn btnPrimary" onClick={checkBackend} disabled={loadingHealth}>
+              {loadingHealth ? "Checking…" : "Check Backend"}
+            </button>
+
+            <div className="hint">API Base: {API_BASE}</div>
+          </div>
         </div>
 
-        {/* Results */}
-        <div style={styles.card}>
-          <div style={styles.cardTitleRow}>
-            <h3 style={styles.cardTitle}>Results</h3>
-          </div>
-
-          <div style={styles.resultsHeader}>
-            <div style={styles.statBox}>
-              <div style={styles.statLabel}>Risk Level</div>
-              <div style={styles.statValue}>{result?.metrics?.risk_level ?? "—"}</div>
+        <div className="grid">
+          {/* Inputs */}
+          <div className="card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <h3 className="cardTitle">Inputs</h3>
+              <button className="btn" onClick={resetAll}>Reset</button>
             </div>
-            <div style={styles.statBox}>
-              <div style={styles.statLabel}>Runway</div>
-              <div style={styles.statValue}>{result?.metrics?.runway_label ?? "—"}</div>
+
+            <div className="inputsGrid">
+              <div className="field">
+                <label>Cash On Hand</label>
+                <input inputMode="decimal" value={inputs.cash_on_hand} onChange={setField("cash_on_hand")} />
+              </div>
+              <div className="field">
+                <label>Monthly Revenue</label>
+                <input inputMode="decimal" value={inputs.monthly_revenue} onChange={setField("monthly_revenue")} />
+              </div>
+
+              <div className="field">
+                <label>Monthly Fixed Costs</label>
+                <input inputMode="decimal" value={inputs.monthly_fixed_costs} onChange={setField("monthly_fixed_costs")} />
+              </div>
+              <div className="field">
+                <label>Monthly Variable Costs</label>
+                <input inputMode="decimal" value={inputs.monthly_variable_costs} onChange={setField("monthly_variable_costs")} />
+              </div>
+
+              <div className="field">
+                <label>Team Size</label>
+                <input inputMode="numeric" value={inputs.team_size} onChange={setField("team_size")} />
+              </div>
+              <div className="field">
+                <label>Avg Fully Loaded Cost / Employee</label>
+                <input inputMode="decimal" value={inputs.avg_fully_loaded_cost_per_employee} onChange={setField("avg_fully_loaded_cost_per_employee")} />
+              </div>
+
+              <div className="field">
+                <label>Revenue Growth Rate MoM (can be negative)</label>
+                <input inputMode="decimal" value={inputs.revenue_growth_rate_mom} onChange={setField("revenue_growth_rate_mom", { allowNegative: true })} />
+              </div>
+              <div className="field">
+                <label>Planned Hires</label>
+                <input inputMode="numeric" value={inputs.planned_hires} onChange={setField("planned_hires")} />
+              </div>
+
+              <div className="field">
+                <label>Projection Months</label>
+                <input inputMode="numeric" value={projectionMonths} onChange={setNumericState(setProjectionMonths)} />
+              </div>
+              <div className="field">
+                <label>Monte Carlo Runs</label>
+                <input inputMode="numeric" value={monteCarloRuns} onChange={setNumericState(setMonteCarloRuns)} />
+              </div>
+            </div>
+
+            <div className="rowActions">
+              <button
+                className="btn btnPrimary"
+                onClick={runAnalysis}
+                disabled={loadingAnalysis}
+                title={backendStatus === "down" ? "Backend unreachable. Try Check Backend." : "Run analysis"}
+              >
+                {loadingAnalysis ? "Running Analysis…" : "Run Analysis"}
+              </button>
+            </div>
+
+            {error && <div className="error">{error}</div>}
+
+            <div className="footerNote">
+              Frontend: Cloudflare Pages • Backend: Render • API: {API_BASE}
             </div>
           </div>
 
-          <div style={styles.chartWrap}>
-            {cashSeries ? <canvas ref={canvasRef} /> : <div style={{ color: "rgba(255,255,255,0.7)" }}>Run analysis to show the chart.</div>}
-          </div>
+          {/* Results */}
+          <div className="card" ref={resultsRef}>
+            <h3 className="cardTitle">Results</h3>
 
-          <div style={styles.conclusion}>
-            <h4 style={styles.conclusionTitle}>Conclusion</h4>
-            {conclusion ? (
-              <>
-                <div style={{ color: "rgba(255,255,255,0.88)", fontWeight: 800 }}>
-                  Risk level: {conclusion.risk} • P(cash negative within 6 months): {conclusion.p6Text}
+            {!result && (
+              <div style={{ color: "rgba(255,255,255,0.72)", fontWeight: 700 }}>
+                Output will appear here after you run analysis.
+              </div>
+            )}
+
+            {result && (
+              <div className="fadeIn">
+                <div className="kpis">
+                  <div className="kpi">
+                    <div className="k">Risk Level</div>
+                    <div className="v">
+                      <span style={riskBadge}>{riskLevel}</span>
+                    </div>
+                  </div>
+
+                  <div className="kpi">
+                    <div className="k">Cash Runway Label</div>
+                    <div className="v">{runwayLabel ?? "—"}</div>
+                  </div>
+
+                  <div className="kpi">
+                    <div className="k">Cash Negative in 6 Months</div>
+                    <div className="v">
+                      {Number.isFinite(pNegative6) ? `${(pNegative6 * 100).toFixed(1)}%` : "—"}
+                    </div>
+                  </div>
                 </div>
-                <div style={{ marginTop: 8, color: "rgba(255,255,255,0.82)", lineHeight: 1.5 }}>
-                  {conclusion.interpretation}
+
+                <div className="chartWrap">
+                  {chartData ? (
+                    <Line data={chartData} options={chartOptions} />
+                  ) : (
+                    <div style={{ color: "rgba(255,255,255,0.72)", fontWeight: 700 }}>No scenario data returned.</div>
+                  )}
                 </div>
-                <div style={{ marginTop: 8, color: "rgba(255,255,255,0.78)" }}>{conclusion.runwayText}</div>
-                <ul style={styles.ul}>
-                  {conclusion.recommendations.map((r, i) => (
-                    <li key={i}>{r}</li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <div style={{ color: "rgba(255,255,255,0.7)" }}>Run analysis to generate a detailed conclusion.</div>
+
+                <div style={{ marginTop: 14 }} id="results-section">
+                  <h3 className="cardTitle" style={{ marginBottom: 8 }}>Conclusion</h3>
+
+                  {conclusionText && (
+                    <>
+                      <div style={{ fontWeight: 800, marginBottom: 6 }}>
+                        Risk level: <span style={riskBadge}>{riskLevel}</span>{" "}
+                        {conclusionText.probabilityLine ? `• ${conclusionText.probabilityLine}` : ""}
+                      </div>
+
+                      <div style={{ color: "rgba(255,255,255,0.86)", lineHeight: 1.5 }}>
+                        {conclusionText.narrative}
+                      </div>
+
+                      <div style={{ marginTop: 10, color: "rgba(255,255,255,0.86)" }}>
+                        {conclusionText.runwayLine}
+                      </div>
+
+                      <div style={{ marginTop: 10, fontWeight: 900 }}>Recommended actions</div>
+                      <ul>
+                        {conclusionText.actions.map((a, idx) => (
+                          <li key={idx}>{a}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
       </div>
-
-      <style>{`
-        @media (max-width: 980px) {
-          .stack { grid-template-columns: 1fr !important; }
-        }
-      `}</style>
-    </div>
+    </>
   );
 }
